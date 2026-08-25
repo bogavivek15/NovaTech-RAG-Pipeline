@@ -203,6 +203,8 @@ def ask_rag(question, n_results=3):
     ]
 
     try:
+        # reasoning_format is not accepted by the installed OpenAI-compatible client.
+        # reasoning_effort="none" is sufficient to request non-reasoning output.
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
@@ -210,9 +212,9 @@ def ask_rag(question, n_results=3):
             top_p=0.8,
             presence_penalty=1.5,
             reasoning_effort="none",
-            reasoning_format="hidden"
+            max_tokens=1024
         )
-        answer = response.choices[0].message.content
+        answer = response.choices[0].message.content or "I don't have enough information."
         answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL)
         answer = re.sub(r'<think>.*', '', answer, flags=re.DOTALL).strip()
     except Exception as error:
