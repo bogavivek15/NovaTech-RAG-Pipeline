@@ -16,7 +16,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     GROQ_API_KEY = GROQ_API_KEY.strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
 
 if not GROQ_API_KEY:
     print("WARNING: GROQ_API_KEY not set! Add it to .env file")
@@ -171,7 +171,6 @@ def retrieve(question, n_results=3):
     scored.sort(reverse=True)
     selected = [item for item in scored[:n_results] if item[0] > 0]
     if not selected:
-        # Return a small fallback set so the LLM can still respond appropriately.
         selected = scored[:n_results]
 
     documents = [chunks_store[index]["text"] for _, index in selected]
@@ -193,7 +192,8 @@ def ask_rag(question, n_results=3):
         {
             "role": "system",
             "content": (
-                "You are a helpful assistant that answers questions based only on the provided context. "
+                "You are a helpful assistant that answers questions based on the provided context. "
+                "Prioritize the context for NovaTech-specific questions. "
                 "If the context does not contain enough information, say 'I don't have enough information.' "
                 "Be concise and professional. For general questions, use your knowledge. "
                 "IMPORTANT: Provide only the final answer without reasoning or tags."
@@ -206,7 +206,11 @@ def ask_rag(question, n_results=3):
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            temperature=0.2
+            temperature=0.7,
+            top_p=0.8,
+            presence_penalty=1.5,
+            reasoning_effort="none",
+            reasoning_format="hidden"
         )
         answer = response.choices[0].message.content
         answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL)
