@@ -1,4 +1,5 @@
-const API_URL = 'http://127.0.0.1:8000';
+// Use the same origin in production (Render) and localhost during local development.
+const API_URL = window.location.origin;
 
 const chatMessages = document.getElementById('chat-messages');
 const userInput = document.getElementById('user-input');
@@ -40,6 +41,7 @@ function setupEventListeners() {
 function checkBackendHealth() {
     fetch(API_URL + '/health')
         .then(function(response) {
+            if (!response.ok) throw new Error('Health check returned HTTP ' + response.status);
             return response.json();
         })
         .then(function(data) {
@@ -49,7 +51,7 @@ function checkBackendHealth() {
             console.error('Backend health check failed:', error);
             systemStatus.innerHTML = `
                 <p class="status-warning">⚠️ Cannot connect to backend</p>
-                <p class="small-text">Make sure FastAPI is running on port 8000</p>
+                <p class="small-text">Backend health check failed</p>
             `;
         });
 }
@@ -59,7 +61,7 @@ function displaySystemStatus(data) {
     if (!data.groq_api_key_configured) {
         html = `
             <p class="status-error">❌ GROQ_API_KEY missing</p>
-            <p class="small-text">Add it to .env file and restart</p>
+            <p class="small-text">Add it to Render environment variables</p>
         `;
     } else {
         html = `
@@ -74,35 +76,40 @@ function displaySystemStatus(data) {
 function sendMessage() {
     const question = userInput.value.trim();
     if (!question) return;
-    
+
     console.log('Sending question:', question);
     userInput.value = '';
-    
+
     const welcome = document.querySelector('.welcome');
     if (welcome) welcome.remove();
-    
+
     addMessage('user', question);
     const loadingDiv = showLoading();
-    
+
     userInput.disabled = true;
     sendBtn.disabled = true;
-    
+
     fetch(API_URL + '/chat', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ question: question })
     })
     .then(function(response) {
-        return response.json();
+        return response.json().then(function(data) {
+            if (!response.ok) {
+                throw new Error(data.detail || 'Backend returned HTTP ' + response.status);
+            }
+            return data;
+        });
     })
     .then(function(data) {
         loadingDiv.remove();
         addMessage('bot', data.answer, data.sources);
     })
     .catch(function(error) {
-        console.error('Error:', error);
+        console.error('Chat error:', error);
         loadingDiv.remove();
-        addMessage('bot', '❌ Error: Could not reach the backend. Make sure FastAPI is running.');
+        addMessage('bot', '❌ Error: ' + error.message);
     })
     .finally(function() {
         userInput.disabled = false;
@@ -114,26 +121,26 @@ function sendMessage() {
 function addMessage(role, text, sources) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message ' + role + '-message';
-    
+
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'avatar';
     avatarDiv.textContent = role === 'user' ? '👤' : '🤖';
-    
+
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
-    
+
     const textDiv = document.createElement('div');
     textDiv.className = 'message-text';
     textDiv.textContent = text;
     contentDiv.appendChild(textDiv);
-    
+
     if (sources && sources.length > 0) {
         const sourcesDiv = document.createElement('div');
         sourcesDiv.className = 'sources';
         sourcesDiv.textContent = '📚 Sources: ' + sources.join(', ');
         contentDiv.appendChild(sourcesDiv);
     }
-    
+
     messageDiv.appendChild(avatarDiv);
     messageDiv.appendChild(contentDiv);
     chatMessages.appendChild(messageDiv);
@@ -160,13 +167,13 @@ function showLoading() {
 function handleFileSelection(event) {
     selectedFiles = Array.from(event.target.files);
     console.log('Files selected:', selectedFiles.length);
-    
+
     if (selectedFiles.length === 0) {
         selectedFilesDiv.innerHTML = '';
         uploadBtn.style.display = 'none';
         return;
     }
-    
+
     let html = '';
     selectedFiles.forEach(function(file) {
         html += `<div class="file-item">📄 ${file.name}</div>`;
@@ -177,22 +184,27 @@ function handleFileSelection(event) {
 
 function uploadFiles() {
     if (selectedFiles.length === 0) return;
-    
+
     console.log('Uploading files...');
     uploadBtn.disabled = true;
     uploadBtn.textContent = '⏳ Processing...';
-    
+
     const formData = new FormData();
     selectedFiles.forEach(function(file) {
         formData.append('files', file);
     });
-    
+
     fetch(API_URL + '/upload', {
         method: 'POST',
         body: formData
     })
     .then(function(response) {
-        return response.json();
+        return response.json().then(function(data) {
+            if (!response.ok) {
+                throw new Error(data.detail || 'Upload failed with HTTP ' + response.status);
+            }
+            return data;
+        });
     })
     .then(function(data) {
         alert('✅ ' + data.message + '\n📊 ' + data.chunks_added + ' chunks added');
