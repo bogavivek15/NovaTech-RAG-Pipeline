@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: novatech-rag-chatbot
+    runtime: docker
+    plan: free
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
