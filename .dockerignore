@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.venv
+venv
+env
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Documentation
+README.md
+DEPLOYMENT.md
+
+# Logs
+*.log
+
+# ChromaDB
+chroma_data/
+
+# Unused files
+start.sh

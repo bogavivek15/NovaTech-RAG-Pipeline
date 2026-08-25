@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaTech Assistant</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <div class="logo-section">
+                <h2>🤖 NovaTech</h2>
+            </div>
+
+            <div class="section">
+                <h3>📊 System Status</h3>
+                <div id="system-status"><p>Checking...</p></div>
+            </div>
+
+            <div class="section">
+                <h3>📁 Upload Documents</h3>
+                <p class="small-text">Supported: .txt, .md</p>
+                <input type="file" id="file-input" multiple accept=".txt,.md" style="display: none;">
+                <button id="choose-files-btn" class="btn">Choose Files</button>
+                <div id="selected-files"></div>
+                <button id="upload-btn" class="btn btn-upload" style="display: none;">📤 Upload & Process</button>
+            </div>
+
+            <div class="section">
+                <h3>💡 Example Questions</h3>
+                <button class="example-btn">What is the work from home policy?</button>
+                <button class="example-btn">How many days of annual leave do employees get?</button>
+                <button class="example-btn">What are the password security requirements?</button>
+                <button class="example-btn">How do I onboard as a new engineer?</button>
+                <button class="example-btn">What is the capital of France?</button>
+            </div>
+        </aside>
+
+        <main class="chat-area">
+            <div class="chat-header">
+                <h1>NovaTech Company Assistant</h1>
+                <p>Ask questions and get instant answers from your knowledge base</p>
+            </div>
+
+            <div id="chat-messages" class="chat-messages">
+                <div class="welcome">
+                    <h2>👋 Welcome!</h2>
+                    <p>I'm your NovaTech assistant. Ask me anything about company policies, procedures, or general knowledge.</p>
+                </div>
+            </div>
+
+            <div class="chat-input">
+                <input type="text" id="user-input" placeholder="Ask a question about NovaTech...">
+                <button id="send-btn">Send</button>
+            </div>
+        </main>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
