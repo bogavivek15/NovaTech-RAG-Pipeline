@@ -1,7 +1,6 @@
 import os
 import re
-import math
-from collections import Counter
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -9,134 +8,164 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
+from fastembed import TextEmbedding
 from typing import List
 
 load_dotenv()
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     GROQ_API_KEY = GROQ_API_KEY.strip()
+
 GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+TOP_K = 3
+MIN_SIMILARITY = 0.30
 
 if not GROQ_API_KEY:
-    print("WARNING: GROQ_API_KEY not set! Add it to .env file")
+    print("WARNING: GROQ_API_KEY not set!")
     client = None
 else:
-    client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    client = OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1"
+    )
     print(f"Groq client initialized with model: {GROQ_MODEL}")
 
+# BGE-small is a lightweight semantic embedding model.
+# FastEmbed runs it with ONNX instead of loading a large PyTorch stack.
+print(f"Loading embedding model: {EMBEDDING_MODEL}")
+embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
+print("Embedding model ready!")
+
+
+# ------------------------------------------------------------
+# Request / response models
+# ------------------------------------------------------------
 class ChatRequest(BaseModel):
     question: str
+
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]
+
 
 class UploadResponse(BaseModel):
     message: str
     files_processed: int
     chunks_added: int
 
-# Lightweight in-memory lexical vector store.
-# This replaces Chroma's bundled ONNX embedding model so the app fits Render Free.
+
+# ------------------------------------------------------------
+# Lightweight semantic vector store
+# ------------------------------------------------------------
 chunks_store = []
+document_embeddings = np.empty((0, 384), dtype=np.float32)
 documents_loaded = False
-vocabulary = {}
-idf = {}
-tf_vectors = []
 
 
 def chunk_document(text, source_name):
-    """Split document into chunks by paragraphs."""
-    paragraphs = text.strip().split("\n\n")
+    """Split a document into paragraph-based chunks."""
+    paragraphs = re.split(r"\n\s*\n+", text.strip())
     chunks = []
-    for para in paragraphs:
-        para = para.strip()
-        if len(para) < 50 or para.startswith("====="):
+
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+
+        if len(paragraph) < 50:
             continue
-        chunks.append({"text": para, "source": source_name})
+
+        if paragraph.startswith("====="):
+            continue
+
+        chunks.append({
+            "text": paragraph,
+            "source": source_name
+        })
+
     return chunks
 
 
-def tokenize(text):
-    """Small, dependency-free tokenizer for lightweight retrieval."""
-    return re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)?", text.lower())
+def rebuild_embeddings():
+    """Create semantic embeddings for every stored chunk."""
+    global document_embeddings
 
-
-def rebuild_index():
-    """Build a TF-IDF index entirely in memory."""
-    global vocabulary, idf, tf_vectors
-    tokenized = [tokenize(item["text"]) for item in chunks_store]
-    vocabulary = {term: i for i, term in enumerate(sorted({t for doc in tokenized for t in doc}))}
-    doc_count = len(tokenized)
-    if not doc_count:
-        vocabulary, idf, tf_vectors = {}, {}, []
+    if not chunks_store:
+        document_embeddings = np.empty((0, 384), dtype=np.float32)
         return
 
-    df = Counter()
-    for tokens in tokenized:
-        df.update(set(tokens))
-    idf = {term: math.log((1 + doc_count) / (1 + freq)) + 1.0 for term, freq in df.items()}
+    documents = [
+        "passage: " + item["text"]
+        for item in chunks_store
+    ]
 
-    tf_vectors = []
-    for tokens in tokenized:
-        counts = Counter(tokens)
-        total = max(len(tokens), 1)
-        vector = {}
-        norm_sq = 0.0
-        for term, count in counts.items():
-            if term in idf:
-                weight = (count / total) * idf[term]
-                vector[term] = weight
-                norm_sq += weight * weight
-        norm = math.sqrt(norm_sq) or 1.0
-        tf_vectors.append({term: weight / norm for term, weight in vector.items()})
+    print(f"Creating semantic embeddings for {len(documents)} chunks...")
 
+    vectors = list(embedding_model.passage_embed(documents))
+    document_embeddings = np.asarray(vectors, dtype=np.float32)
 
-def initialize_collection():
-    """Compatibility helper for the existing application flow."""
-    return True
+    # Normalize vectors so their dot product is cosine similarity.
+    norms = np.linalg.norm(document_embeddings, axis=1, keepdims=True)
+    document_embeddings = document_embeddings / np.maximum(norms, 1e-12)
+
+    print(
+        f"Semantic index ready: {document_embeddings.shape[0]} vectors x "
+        f"{document_embeddings.shape[1]} dimensions"
+    )
 
 
 def find_data_folder():
     current_folder = os.path.dirname(__file__)
     data_folder = os.path.join(current_folder, "_data")
+
     if os.path.isdir(data_folder):
         return data_folder
+
     raise FileNotFoundError("Cannot find _data folder with documents!")
 
 
 def load_documents():
-    """Load text files and build the lightweight retrieval index."""
+    """Load text files and build the semantic retrieval index."""
     global documents_loaded
+
     if documents_loaded:
         return
 
     print("Loading documents from _data folder...")
-    initialize_collection()
+
     try:
         data_folder = find_data_folder()
     except FileNotFoundError:
-        print("WARNING: No _data folder found. Skipping initial document load.")
+        print("WARNING: No _data folder found.")
         documents_loaded = True
         return
 
     chunks_store.clear()
-    for filename in os.listdir(data_folder):
-        if filename.endswith(".txt"):
-            filepath = os.path.join(data_folder, filename)
-            with open(filepath, "r", encoding="utf-8") as f:
-                chunks = chunk_document(f.read(), filename)
-            chunks_store.extend(chunks)
-            print(f"   {filename}: {len(chunks)} chunks")
 
-    rebuild_index()
+    for filename in os.listdir(data_folder):
+        if not filename.endswith(".txt"):
+            continue
+
+        filepath = os.path.join(data_folder, filename)
+
+        with open(filepath, "r", encoding="utf-8") as file:
+            chunks = chunk_document(file.read(), filename)
+
+        chunks_store.extend(chunks)
+        print(f"   {filename}: {len(chunks)} chunks")
+
+    rebuild_embeddings()
     documents_loaded = True
-    print(f"Loaded {len(chunks_store)} chunks into lightweight retrieval index")
+
+    print(f"Loaded {len(chunks_store)} chunks into semantic retrieval index")
 
 
 def process_uploaded_file(content: bytes, filename: str):
-    """Process an uploaded file and add it to the retrieval index."""
+    """Process an uploaded file and rebuild semantic embeddings."""
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -144,67 +173,93 @@ def process_uploaded_file(content: bytes, filename: str):
 
     chunks = chunk_document(text, filename)
     chunks_store.extend(chunks)
-    rebuild_index()
+    rebuild_embeddings()
+
     return len(chunks)
 
 
-def retrieve(question, n_results=3):
-    """Retrieve the most relevant chunks using cosine similarity over TF-IDF vectors."""
-    if not chunks_store:
-        raise HTTPException(status_code=503, detail="Documents not loaded yet. Please try again.")
+def retrieve(question, n_results=TOP_K):
+    """Retrieve chunks using semantic embeddings and cosine similarity."""
+    if not chunks_store or document_embeddings.size == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="Documents are not loaded yet. Please try again."
+        )
 
-    query_tokens = tokenize(question)
-    query_counts = Counter(query_tokens)
-    total = max(len(query_tokens), 1)
-    query_vector = {}
-    for term, count in query_counts.items():
-        if term in idf:
-            query_vector[term] = (count / total) * idf[term]
-    query_norm = math.sqrt(sum(value * value for value in query_vector.values())) or 1.0
-    query_vector = {term: value / query_norm for term, value in query_vector.items()}
+    # Use the query-specific embedding method recommended for retrieval.
+    query_vector = list(
+        embedding_model.query_embed(["query: " + question])
+    )[0]
 
-    scored = []
-    for index, vector in enumerate(tf_vectors):
-        score = sum(query_vector.get(term, 0.0) * weight for term, weight in vector.items())
-        scored.append((score, index))
+    query_vector = np.asarray(query_vector, dtype=np.float32)
+    query_vector = query_vector / max(np.linalg.norm(query_vector), 1e-12)
 
-    scored.sort(reverse=True)
-    selected = [item for item in scored[:n_results] if item[0] > 0]
+    # Because both sides are normalized, dot product = cosine similarity.
+    scores = np.dot(document_embeddings, query_vector)
+    ranked_indexes = np.argsort(scores)[::-1]
+
+    selected = []
+
+    for index in ranked_indexes[:n_results]:
+        score = float(scores[index])
+
+        if score >= MIN_SIMILARITY:
+            selected.append((score, int(index)))
+
     if not selected:
-        selected = scored[:n_results]
+        return [], []
 
     documents = [chunks_store[index]["text"] for _, index in selected]
-    metadata = [{"source": chunks_store[index]["source"]} for _, index in selected]
-    return documents, metadata
+    sources = [
+        {"source": chunks_store[index]["source"]}
+        for _, index in selected
+    ]
+
+    print("Retrieval scores:", [round(score, 3) for score, _ in selected])
+    print("Retrieved sources:", list(dict.fromkeys(s["source"] for s in sources)))
+
+    return documents, sources
 
 
-def ask_rag(question, n_results=3):
-    """Ask a question using the RAG pipeline."""
+# ------------------------------------------------------------
+# RAG answer generation
+# ------------------------------------------------------------
+def ask_rag(question, n_results=TOP_K):
+    """Retrieve semantic context and generate a grounded answer."""
     if client is None:
-        raise HTTPException(status_code=503, detail="GROQ_API_KEY is not set. Add it to .env file and restart.")
+        raise HTTPException(
+            status_code=503,
+            detail="GROQ_API_KEY is not set. Add it to Render environment variables."
+        )
 
     chunks, sources = retrieve(question, n_results)
+
     if not chunks:
-        return "I don't have enough information to answer this question.", []
+        return "I do not have enough information in the NovaTech knowledge base.", []
 
     context = "\n\n".join(chunks)
+
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a helpful assistant that answers questions based on the provided context. "
-                "Prioritize the context for NovaTech-specific questions. "
-                "If the context does not contain enough information, say 'I don't have enough information.' "
-                "Be concise and professional. For general questions, use your knowledge. "
-                "IMPORTANT: Provide only the final answer without reasoning or tags."
+                "You are the NovaTech company assistant. "
+                "Use the provided context to answer NovaTech-specific questions. "
+                "Do not invent company policies, procedures, employee records, or product details. "
+                "If the context does not contain enough information, say exactly: "
+                "'I do not have enough information in the NovaTech knowledge base.' "
+                "For ordinary general questions, answer normally when the question is clearly "
+                "not asking about NovaTech. Be concise and professional. "
+                "Provide only the final answer without reasoning or tags."
             )
         },
-        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+        {
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {question}"
+        }
     ]
 
     try:
-        # reasoning_format is not accepted by the installed OpenAI-compatible client.
-        # reasoning_effort="none" is sufficient to request non-reasoning output.
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
@@ -214,21 +269,32 @@ def ask_rag(question, n_results=3):
             reasoning_effort="none",
             max_tokens=1024
         )
-        answer = response.choices[0].message.content or "I don't have enough information."
-        answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL)
-        answer = re.sub(r'<think>.*', '', answer, flags=re.DOTALL).strip()
+
+        answer = response.choices[0].message.content or (
+            "I do not have enough information in the NovaTech knowledge base."
+        )
+
+        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL)
+        answer = re.sub(r"<think>.*", "", answer, flags=re.DOTALL).strip()
+
     except Exception as error:
         print(f"Groq API error: {error}")
-        raise HTTPException(status_code=502, detail=f"Groq API error: {error}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Groq API error: {error}"
+        )
 
     unique_sources = list(dict.fromkeys(s["source"] for s in sources))
     return answer, unique_sources
 
 
+# ------------------------------------------------------------
+# FastAPI application
+# ------------------------------------------------------------
 app = FastAPI(
     title="NovaTech RAG Chatbot",
-    version="1.0",
-    description="RAG-powered chatbot using Groq and lightweight TF-IDF retrieval"
+    version="2.0",
+    description="RAG chatbot using lightweight semantic embeddings and Groq"
 )
 
 app.add_middleware(
@@ -240,6 +306,7 @@ app.add_middleware(
 )
 
 static_dir = os.path.join(os.path.dirname(__file__), "static")
+
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -247,7 +314,8 @@ if os.path.exists(static_dir):
 @app.on_event("startup")
 def startup_event():
     print("Starting NovaTech RAG Chatbot...")
-    print(f"   Model: {GROQ_MODEL}")
+    print(f"   Answer model: {GROQ_MODEL}")
+    print(f"   Embedding model: {EMBEDDING_MODEL}")
     load_documents()
     print("RAG pipeline ready!")
 
@@ -255,22 +323,36 @@ def startup_event():
 @app.get("/")
 def home():
     index_path = os.path.join(static_dir, "index.html")
+
     if os.path.exists(index_path):
         return FileResponse(index_path)
+
     return {
         "message": "Welcome to NovaTech RAG Chatbot!",
         "model": GROQ_MODEL,
-        "endpoints": {"chat": "POST /chat", "upload": "POST /upload", "health": "GET /health"}
+        "embedding_model": EMBEDDING_MODEL,
+        "endpoints": {
+            "chat": "POST /chat",
+            "upload": "POST /upload",
+            "health": "GET /health"
+        }
     }
 
 
 @app.get("/health")
 def health_check():
+    dimensions = 0
+
+    if document_embeddings.size:
+        dimensions = int(document_embeddings.shape[1])
+
     return {
         "status": "running",
         "groq_api_key_configured": bool(GROQ_API_KEY),
         "model": GROQ_MODEL,
-        "retriever": "tfidf",
+        "retriever": "semantic",
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_dimensions": dimensions,
         "document_chunks": len(chunks_store),
         "documents_loaded": documents_loaded
     }
@@ -283,18 +365,20 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 
     files_processed = 0
     total_chunks = 0
+
     for file in files:
         if not file.filename.endswith((".txt", ".md")):
             print(f"Skipping {file.filename} - only .txt and .md files supported")
             continue
+
         try:
             content = await file.read()
             chunks_added = process_uploaded_file(content, file.filename)
             files_processed += 1
             total_chunks += chunks_added
             print(f"Processed {file.filename}: {chunks_added} chunks added")
-        except Exception as e:
-            print(f"Error processing {file.filename}: {str(e)}")
+        except Exception as error:
+            print(f"Error processing {file.filename}: {error}")
 
     if files_processed == 0:
         raise HTTPException(status_code=400, detail="No valid files were processed.")
@@ -308,11 +392,17 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    print(f"\n{'=' * 60}")
-    print(f"Question: {request.question}")
-    print(f"{'-' * 60}")
+    question = request.question.strip()
+
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    print("\n" + "=" * 60)
+    print(f"Question: {question}")
+    print("-" * 60)
+
     try:
-        answer, sources = ask_rag(request.question, n_results=3)
+        answer, sources = ask_rag(question, n_results=TOP_K)
         print(f"Sources: {sources}")
         print(f"Answer: {answer[:100]}...")
     except HTTPException:
