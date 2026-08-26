@@ -13,9 +13,6 @@ from typing import List
 
 load_dotenv()
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     GROQ_API_KEY = GROQ_API_KEY.strip()
@@ -24,6 +21,7 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 TOP_K = 3
 MIN_SIMILARITY = 0.30
+EMBED_BATCH_SIZE = 8
 
 if not GROQ_API_KEY:
     print("WARNING: GROQ_API_KEY not set!")
@@ -37,14 +35,15 @@ else:
 
 # BGE-small is a lightweight semantic embedding model.
 # FastEmbed runs it with ONNX instead of loading a large PyTorch stack.
+# One thread and small batches reduce peak RAM on Render's 512 MB instance.
 print(f"Loading embedding model: {EMBEDDING_MODEL}")
-embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL)
+embedding_model = TextEmbedding(
+    model_name=EMBEDDING_MODEL,
+    threads=1
+)
 print("Embedding model ready!")
 
 
-# ------------------------------------------------------------
-# Request / response models
-# ------------------------------------------------------------
 class ChatRequest(BaseModel):
     question: str
 
@@ -60,9 +59,6 @@ class UploadResponse(BaseModel):
     chunks_added: int
 
 
-# ------------------------------------------------------------
-# Lightweight semantic vector store
-# ------------------------------------------------------------
 chunks_store = []
 document_embeddings = np.empty((0, 384), dtype=np.float32)
 documents_loaded = False
@@ -91,7 +87,7 @@ def chunk_document(text, source_name):
 
 
 def rebuild_embeddings():
-    """Create semantic embeddings for every stored chunk."""
+    """Create semantic embeddings in small batches to reduce peak RAM."""
     global document_embeddings
 
     if not chunks_store:
@@ -103,10 +99,28 @@ def rebuild_embeddings():
         for item in chunks_store
     ]
 
-    print(f"Creating semantic embeddings for {len(documents)} chunks...")
+    print(
+        f"Creating semantic embeddings for {len(documents)} chunks "
+        f"in batches of {EMBED_BATCH_SIZE}..."
+    )
 
-    vectors = list(embedding_model.passage_embed(documents))
-    document_embeddings = np.asarray(vectors, dtype=np.float32)
+    all_vectors = []
+
+    for start in range(0, len(documents), EMBED_BATCH_SIZE):
+        batch = documents[start:start + EMBED_BATCH_SIZE]
+        batch_vectors = list(
+            embedding_model.passage_embed(
+                batch,
+                batch_size=EMBED_BATCH_SIZE
+            )
+        )
+        all_vectors.extend(batch_vectors)
+        print(
+            f"   Embedded {min(start + len(batch), len(documents))}/"
+            f"{len(documents)} chunks"
+        )
+
+    document_embeddings = np.asarray(all_vectors, dtype=np.float32)
 
     # Normalize vectors so their dot product is cosine similarity.
     norms = np.linalg.norm(document_embeddings, axis=1, keepdims=True)
@@ -221,9 +235,6 @@ def retrieve(question, n_results=TOP_K):
     return documents, sources
 
 
-# ------------------------------------------------------------
-# RAG answer generation
-# ------------------------------------------------------------
 def ask_rag(question, n_results=TOP_K):
     """Retrieve semantic context and generate a grounded answer."""
     if client is None:
@@ -288,9 +299,6 @@ def ask_rag(question, n_results=TOP_K):
     return answer, unique_sources
 
 
-# ------------------------------------------------------------
-# FastAPI application
-# ------------------------------------------------------------
 app = FastAPI(
     title="NovaTech RAG Chatbot",
     version="2.0",
