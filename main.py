@@ -17,7 +17,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     GROQ_API_KEY = GROQ_API_KEY.strip()
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 TOP_K = 3
 MIN_SIMILARITY = 0.30
